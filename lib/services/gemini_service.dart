@@ -1,40 +1,56 @@
 import 'package:google_generative_ai/google_generative_ai.dart';
+import 'key_manager.dart';
 
 class GeminiService {
-  final String apiKey;
-  late final GenerativeModel model;
+  final KeyManager keyManager;
 
-  GeminiService(this.apiKey) {
-    model = GenerativeModel(
+  GeminiService(this.keyManager);
+
+  Future<String> processCodeTransformation(String originalCode, String instruction) async {
+    return await _executeWithRetry(originalCode, instruction, retry: true);
+  }
+
+  Future<String> _executeWithRetry(String code, String instruction, {required bool retry}) async {
+    final apiKey = keyManager.currentGeminiKey;
+    if (apiKey == null) throw Exception("No Gemini API Key available.");
+
+    final model = GenerativeModel(
       model: 'gemini-1.5-flash',
       apiKey: apiKey,
     );
-  }
 
-  Future<String> processCodeTransformation(String originalCode, String instruction) async {
     final prompt = [
       Content.text('''
       ACT AS: A Senior Software Engineer.
       TASK: Modify the provided code based on the instructions.
-      RULES:
-      1. Return ONLY the modified code.
-      2. Do NOT use markdown code blocks (no ```dart).
-      3. Do NOT provide explanations.
+      RULES: Return ONLY the modified code. No markdown. No explanations.
       
       ORIGINAL CODE:
-      $originalCode
+      $code
       
       INSTRUCTION:
       $instruction
       ''')
     ];
 
-    final response = await model.generateContent(prompt);
-    final newCode = response.text;
-
-    if (newCode == null) throw Exception("Gemini returned empty response");
-    
-    // Safety cleanup in case model ignores "No Markdown" rule
-    return newCode.replaceAll('```dart', '').replaceAll('```', '').trim();
+    try {
+      final response = await model.generateContent(prompt);
+      final newCode = response.text;
+      if (newCode == null) throw Exception("Empty response");
+      
+      return newCode.replaceAll('```dart', '').replaceAll('```', '').trim();
+    } catch (e) {
+      // Handle Rate Limit (429) or Invalid Key
+      if (e.toString().contains('429') || e.toString().contains('quota')) {
+        if (retry) {
+          print("Rate limit hit. Rotating key and retrying...");
+          keyManager.rotateKey();
+          return await _executeWithRetry(code, instruction, retry: false);
+        } else {
+          throw Exception("All API keys exhausted or rate-limited.");
+        }
+      }
+      rethrow;
+    }
   }
 }
